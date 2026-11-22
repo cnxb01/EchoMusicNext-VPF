@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QUuid>
 #include <QFutureWatcher>
 #include <QtConcurrentRun>
@@ -294,6 +295,16 @@ QVariantMap AudioEffectCatalog::decorate(QVariantMap effect) const
         effect.remove("vpf_urls");
         effect.remove("unavailable_reason");
     }
+    // A VPF parameter file can only be applied by an engine that declares the
+    // VPF resource kind. Report that as its own reason so the card can hide the
+    // download action while an engine is missing, and offer it once installed.
+    const bool needsEngine = !path.isEmpty()
+                                 ? m_controls.identityNeedsEngine(identity(effect), path)
+                                 : !effect.value("vpf_urls").toList().isEmpty();
+    effect.insert("engine_reason",
+                  needsEngine && !m_controls.vpfEngineAvailable()
+                      ? tr("此音效需要支持 VPF 的音效引擎")
+                      : QString());
     return effect;
 }
 void AudioEffectCatalog::cancel(bool download)
@@ -310,7 +321,8 @@ void AudioEffectCatalog::cancel(bool download)
     ++m_downloadGeneration;
     m_installer.cancel();
     m_downloading.clear();
-    m_urls.clear();
+    m_impulseDestination.clear();
+    m_vpfDestination.clear();
     m_progress = 0;
 }
 void AudioEffectCatalog::shutdown()
@@ -795,28 +807,43 @@ void AudioEffectCatalog::beginDownload(const QVariantMap &effect)
         emit notice(m_error, true);
         return;
     }
-    if (!effect.value("vpf_urls").toList().isEmpty()) {
+    QStringList impulseUrls, vpfUrls;
+    for (const auto &raw : effect.value("sound_urls").toList()) {
+        const QUrl url(raw.toString());
+        if (resource(url))
+            impulseUrls.append(url.toString());
+    }
+    for (const auto &raw : effect.value("vpf_urls").toList()) {
+        const QUrl url(raw.toString());
+        if (resource(url))
+            vpfUrls.append(url.toString());
+    }
+    if (impulseUrls.isEmpty() && vpfUrls.isEmpty()) {
+        m_error = tr("此音效没有可用的音效资源");
+        emit changed();
+        emit notice(m_error, true);
+        return;
+    }
+    // Market VPF effects are applied by an external engine. Refuse before any
+    // bytes are written when no installed engine declares that capability.
+    if (!vpfUrls.isEmpty() && !m_controls.vpfEngineAvailable()) {
         m_error = tr("此音效需要支持 VPF 的音效引擎");
         emit changed();
         emit notice(m_error, true);
         return;
     }
-    m_urls.clear();
-    for (const auto &raw : effect.value("sound_urls").toList()) {
-        const QUrl url(raw.toString());
-        if (resource(url))
-            m_urls.append(url.toString());
-    }
-    if (m_urls.isEmpty()) {
-        m_error = tr("此音效没有可用的脉冲响应资源");
-        emit changed();
-        emit notice(m_error, true);
-        return;
-    }
-    m_downloading = effect;
     const auto directory = m_controls.effectFilesRoot() + "/downloads";
-    m_destination = directory + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".irs";
-    m_installer.install(++m_downloadGeneration, m_urls, m_destination);
+    // One stem keeps a combined package identifiable for later removal.
+    const auto stem = directory + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QList<EffectResourceRequest> requests;
+    m_impulseDestination = impulseUrls.isEmpty() ? QString() : stem + ".irs";
+    m_vpfDestination = vpfUrls.isEmpty() ? QString() : stem + ".vpf";
+    if (!m_impulseDestination.isEmpty())
+        requests.append({impulseUrls, m_impulseDestination});
+    if (!m_vpfDestination.isEmpty())
+        requests.append({vpfUrls, m_vpfDestination});
+    m_downloading = effect;
+    m_installer.install(++m_downloadGeneration, requests);
     emit changed();
 }
 void AudioEffectCatalog::useDownloaded(const QString &key)
@@ -843,16 +870,23 @@ void AudioEffectCatalog::useDownloaded(const QString &key)
 void AudioEffectCatalog::finishDownload(bool success, const QString &error)
 {
     if (success) {
-        m_controls.registerImpulseResponse(m_destination, m_downloading.value("name").toString(),
-                                           identity(m_downloading));
+        m_controls.registerEffectPackage(m_impulseDestination, m_vpfDestination,
+                                         m_downloading.value("name").toString(),
+                                         identity(m_downloading));
         m_error.clear();
         emit downloaded(identity(m_downloading), m_downloading.value("name").toString());
     } else {
         m_error = error.isEmpty() ? tr("音效下载失败") : error;
+        // A package is atomic: never leave one accepted member behind when the
+        // other one failed, or the identity would resolve to an unusable pair.
+        for (const auto &candidate : {m_impulseDestination, m_vpfDestination})
+            if (!candidate.isEmpty())
+                QFile::remove(candidate);
         emit notice(m_error, true);
     }
     m_downloading = {};
-    m_urls.clear();
+    m_impulseDestination.clear();
+    m_vpfDestination.clear();
     m_progress = 0;
     if (rowCount())
         emit dataChanged(index(0), index(rowCount() - 1));
