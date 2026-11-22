@@ -5,6 +5,9 @@ ECHO_SETTING(Appearance, ExtensionSkin, "appearance/extensionSkin", Device)
 ECHO_SETTING(Artists, AlbumSort, "artists/albumSort", Portable)
 ECHO_SETTING(Artists, SongSort, "artists/songSort", Portable)
 ECHO_PREFIX(Audio, DownloadedEffectsPrefix, "audio/downloadedEffects/", Portable)
+// Companion VPF parameter file of a downloaded market effect, keyed by the same
+// effect identity as DownloadedEffectsPrefix. Absent for impulse-only effects.
+ECHO_PREFIX(Audio, DownloadedEffectVpfPrefix, "audio/downloadedEffectVpf/", Portable)
 ECHO_SETTING(Audio, Equalizer, "audio/equalizer", Portable)
 ECHO_SETTING(Audio, Exclusive, "audio/exclusive", Device)
 ECHO_SETTING(Audio, ImpulseEnabled, "audio/impulseEnabled", Portable)
