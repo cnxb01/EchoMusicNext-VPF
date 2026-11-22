@@ -89,10 +89,12 @@ ColumnLayout {
                 enabled: pane.effectActive && !pane.audio.effectPending
                 opacity: 1
                 onClicked: {
-                    if (pane.audio.providerId.length > 0)
-                        pane.audio.selectProviderPreset("");
-                    else
+                    // A VPF effect cannot fall back to the built-in stage when
+                    // the engine stops, so "原声" releases it as well.
+                    if (pane.audio.impulseEnabled)
                         pane.audio.impulseEnabled = false;
+                    else if (pane.audio.providerId.length > 0)
+                        pane.audio.selectProviderPreset("");
                 }
                 EchoStatusDot {
                     objectName: "originalEffectCurrentDot"
@@ -249,6 +251,18 @@ ColumnLayout {
             }
         }
     }
+    Label {
+        // Downloaded market effects may carry VPF parameters. Explain the
+        // disabled entries instead of leaving an unexplained greyed-out list.
+        visible: pane.libraryTab === 1 && !pane.audio.vpfEngineAvailable && pane.files.some(file => file.engine)
+        Layout.fillWidth: true
+        Layout.leftMargin: 12
+        Layout.rightMargin: 12
+        text: qsTr("部分音效需要支持 VPF 的音效引擎，可在「设置 → 音效管理」导入")
+        color: Theme.floating.secondaryText
+        font: Theme.font(9, Theme.regularWeight)
+        wrapMode: Text.Wrap
+    }
     Item {
         Layout.fillWidth: true
         Layout.fillHeight: true
@@ -328,7 +342,9 @@ ColumnLayout {
                 minimumHeight: 42
                 font: Theme.font(12, Theme.semiboldWeight)
                 text: modelData.name
-                enabled: modelData.available
+                // Entries that carry VPF parameters stay selectable only while a
+                // supporting engine is installed.
+                enabled: modelData.available && (!modelData.engine || pane.audio.vpfEngineAvailable)
                 accent: pane.audio.impulseEnabled && pane.audio.impulseResponse === modelData.path
                 onClicked: pane.audio.selectImpulseResponse(modelData.path)
             }
