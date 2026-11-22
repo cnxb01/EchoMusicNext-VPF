@@ -4,6 +4,7 @@
 #include "DspProviderRegistry.h"
 #include "ImpulseResponseImporter.h"
 #include "SettingsStore.h"
+#include <QJsonArray>
 #include <QTimer>
 #include <QVariantList>
 namespace EchoMusic
@@ -46,6 +47,9 @@ class PlaybackAudioControls final : public QObject
     Q_PROPERTY(bool effectPending READ effectPending NOTIFY changed)
     Q_PROPERTY(QVariantList providerControls READ providerControls NOTIFY changed)
     Q_PROPERTY(QString providerEditingPreset READ providerEditingPreset NOTIFY changed)
+    /// True when at least one installed engine declares the VPF resource kind.
+    /// Market effects that ship a VPF parameter file are unusable without it.
+    Q_PROPERTY(bool vpfEngineAvailable READ vpfEngineAvailable NOTIFY changed)
 public:
     PlaybackAudioControls(AudioEngine &engine, NativeBridge &native,
                           EchoMusic::SettingsStore &settings, QObject *parent = nullptr);
@@ -122,7 +126,24 @@ public:
     void setTrackLoudness(const QJsonObject &source);
     void registerImpulseResponse(const QString &path, const QString &name,
                                  const QString &identity = {});
+    /// Registers a downloaded effect package. Market effects may combine an
+    /// impulse response with a VPF parameter file; either member may be absent,
+    /// and the surviving file becomes the selectable entry.
+    void registerEffectPackage(const QString &impulseResponsePath, const QString &vpfPath,
+                               const QString &name, const QString &identity);
     QString downloadedImpulseResponse(const QString &identity) const;
+    /// Whether the given effect file needs an external engine (it carries VPF
+    /// parameters) instead of the built-in convolution stage.
+    Q_INVOKABLE bool impulseRequiresEngine(const QString &path) const;
+    /// Cheap projection helper for catalog rows: one identity lookup, no scan of
+    /// the whole sound-file list.
+    bool identityNeedsEngine(const QString &identity, const QString &path) const;
+    /// Capability query against every installed engine, not just the active one.
+    Q_INVOKABLE bool supportsResource(const QString &kind, const QString &extension) const;
+    bool vpfEngineAvailable() const
+    {
+        return supportsResource("vpf", QStringLiteral(".vpf"));
+    }
 
     void handleEvent(const QJsonObject &event);
     Q_INVOKABLE void setEqualizerBand(int index, double gain);
@@ -227,6 +248,11 @@ private:
     QTimer m_equalizerCommit;
     QStringList m_irsPaths, m_importBatchPaths;
     QString uniqueEffectName(const QString &name, const QString &exceptPath) const;
+    /// External resource descriptors (`[{kind,path}, ...]`) for one effect file.
+    QJsonArray effectResources(const QString &path) const;
+    QString identityForPath(const QString &path) const;
+    QString vpfPathFor(const QString &path) const;
+    QString providerForResources(const QJsonArray &resources) const;
     bool m_exclusive = false, m_ready = false, m_irsEnabled = false;
     double m_mix = .5;
 };
