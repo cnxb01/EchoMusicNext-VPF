@@ -12,7 +12,9 @@ Rectangle {
     required property AudioEffectCatalog catalog
     required property int row
     property bool resourceActive: true
-    readonly property string unavailable: effect.needs_validation ? "" : effect.unavailable_reason || (effect.vpf_urls && effect.vpf_urls.length > 0 ? qsTr("此音效需要支持 VPF 的音效引擎") : "")
+    // engine_reason is authored by the catalog: a VPF effect is only listed as
+    // unavailable while no installed engine declares VPF support.
+    readonly property string unavailable: effect.needs_validation ? "" : effect.unavailable_reason || effect.engine_reason || ""
     implicitHeight: Math.max(64, copy.implicitHeight + 20)
     radius: Theme.cardRadius
     color: hovered.hovered || effect.active ? Theme.mix(Theme.floating.elevated, Theme.floating.accent, .06) : Theme.floating.mutedSurface
