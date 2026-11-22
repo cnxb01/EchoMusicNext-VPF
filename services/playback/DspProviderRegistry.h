@@ -35,6 +35,12 @@ public:
         return m_error;
     }
     QVariantMap record(const QString &id) const;
+    /// Every installed provider record, used for capability queries such as
+    /// "is any engine able to load a VPF parameter file".
+    QVariantList records() const
+    {
+        return m_rows;
+    }
     Q_INVOKABLE void importFile(const QUrl &url);
     void remove(const QString &id);
 signals:
