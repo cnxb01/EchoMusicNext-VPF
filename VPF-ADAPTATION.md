@@ -12,8 +12,8 @@
 
 ## 自己重建安装包（不改代码）
 
-1. 打开 Actions 标签页，左侧选「VPF verification build」。
-2. 右侧点 **Run workflow**，分支保持 `vpf-adaptation`，勾选 `windows_package`，再点绿色按钮。
+1. 打开 Actions 标签页，左侧选「VPF Windows build」。
+2. 右侧点 **Run workflow**，分支保持 `vpf-adaptation`，再点绿色按钮（没有其它参数要填）。
 3. 约 70 分钟后，进这次运行页面，底部 **Artifacts** 下载安装包。
 
 ## 上游发新版后如何跟进
@@ -61,15 +61,16 @@ Rust 侧（`crates/echo-audio`）无需改动：`providerResources`、`ensure_pr
 - `modules/EchoMusic/Playback/PlaybackEffectCard.qml`：使用目录给出的 `engine_reason`。
 - `modules/EchoMusic/Playback/PlaybackImpulseEffectPane.qml`：纯 VPF 条目引擎门控、缺引擎提示；
   「原声」按钮同时释放 VPF 音效。
-- `.github/workflows/vpf-verify.yml`：本次新增的验证流水线（Linux 编译 + Windows 打包），
+- `.github/workflows/vpf-verify.yml`：本次新增的构建流水线（仅 Windows x64），
   不参与上游发布流程。
 
-## 验证
+## 验证 / 构建
 
-`Actions → VPF verification build → Run workflow`：
+`Actions → VPF Windows build → Run workflow`（无参数，约 70 分钟）：
 
-- `Linux x64 compile`：快速验证 C++/QML 编译。
-- `Windows x64 build and package`：产出 `EchoMusicNext-<version>-Windows-x64-Setup.exe` 工件。
+- 单一作业 `Windows x64 build and package`，产出
+  `EchoMusicNext-<version>-Windows-x64-Setup.exe` 工件。
+- 不构建 Linux / macOS，也不构建 Windows arm64；本仓只在 Windows x64 上使用。
 
 运行态自检：装好引擎后，广场中的 VPF 条目应可下载并听出差异；未装引擎时仍提示需要引擎（正确行为）；
 「原声」立即失效；删除音效后 `audio-effects/downloads` 下的 `.irs` 与 `.vpf` 成对消失。
