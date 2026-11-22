@@ -181,8 +181,10 @@ private:
     quint64 m_downloadGeneration = 0;
     QList<QVariantMap> m_rows;
     QVariantMap m_downloading, m_commonEffect;
-    QStringList m_urls;
-    QString m_category = "artist", m_brandName, m_error, m_destination;
+    QString m_category = "artist", m_brandName, m_error;
+    // Package members of the running download: market effects may install an
+    // impulse response and a VPF parameter file as one atomic unit.
+    QString m_impulseDestination, m_vpfDestination;
     quint64 m_revision = 0, m_request = 0, m_common = 0, m_brand = 0;
     int m_page = 1, m_total = 0, m_sort = 2;
     bool m_more = true, m_closing = false;
