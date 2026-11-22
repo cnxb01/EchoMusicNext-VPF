@@ -8,6 +8,8 @@
 #include <QElapsedTimer>
 #include <QLoggingCategory>
 #include <QCoreApplication>
+#include <memory>
+#include <utility>
 namespace EchoMusic
 {
 namespace
@@ -24,26 +26,32 @@ class InstallWorker final : public QObject
 {
     Q_OBJECT
 public:
-    void install(quint64 generation, const QStringList &urls, const QString &destination)
+    void install(quint64 generation, const QList<EffectResourceRequest> &resources)
     {
         cancel();
         m_generation = generation;
-        m_destination = destination;
-        m_storage = StorageFence::write(destination);
+        m_resources = resources;
+        m_resource = 0;
+        if (m_resources.isEmpty()) {
+            complete(false, tr("音效资源下载失败"));
+            return;
+        }
+        m_destination = m_resources.first().destination;
+        // One lease covers the whole package: the files land in the same
+        // managed directory, so a backup snapshot must exclude every writer.
+        m_storage = StorageFence::write(QFileInfo(m_destination).absolutePath());
         if (!m_storage) {
             complete(false, tr("备份进行中，请稍后下载音效"));
             return;
         }
-        for (const auto &url : urls)
-            if (permitted(QUrl(url)) && m_urls.size() < 16)
-                m_urls.append(url);
-        if (!QDir().mkpath(QFileInfo(destination).absolutePath())) {
-            complete(false, tr("无法创建音效目录"));
-            return;
-        }
+        for (const auto &resource : std::as_const(m_resources))
+            if (!QDir().mkpath(QFileInfo(resource.destination).absolutePath())) {
+                complete(false, tr("无法创建音效目录"));
+                return;
+            }
         if (!m_network)
             m_network = new QNetworkAccessManager(this);
-        next();
+        start();
     }
     void cancel()
     {
@@ -56,6 +64,8 @@ public:
         m_file.reset();
         m_storage.reset();
         m_urls.clear();
+        m_resources.clear();
+        m_resource = 0;
         m_url = 0;
     }
 signals:
@@ -75,7 +85,38 @@ private:
         }
         return true;
     }
-    void next()
+    // Publishes progress across the whole package, not per single file, so a
+    // combined VPF + impulse response download does not reset the indicator.
+    void publish(qint64 received, qint64 total)
+    {
+        if (m_throttle.elapsed() < 100)
+            return;
+        m_throttle.restart();
+        const auto fraction = total > 0 ? double(received) / double(total) : 0.;
+        const auto count = qMax(1, int(m_resources.size()));
+        emit progress(m_generation,
+                      (double(qBound(0, m_resource, count - 1)) + fraction) / double(count));
+    }
+    void start()
+    {
+        if (m_resource >= m_resources.size()) {
+            complete(true, {});
+            return;
+        }
+        const auto resource = m_resources.at(m_resource);
+        m_destination = resource.destination;
+        m_urls.clear();
+        for (const auto &url : resource.urls)
+            if (permitted(QUrl(url)) && m_urls.size() < 16)
+                m_urls.append(url);
+        m_url = 0;
+        if (m_urls.isEmpty()) {
+            complete(false, tr("音效资源下载失败"));
+            return;
+        }
+        attempt();
+    }
+    void attempt()
     {
         if (m_url >= m_urls.size()) {
             complete(false, tr("音效资源下载失败"));
@@ -111,10 +152,7 @@ private:
                         m_reply->abort();
                         return;
                     }
-                    if (m_throttle.elapsed() >= 100) {
-                        m_throttle.restart();
-                        emit progress(m_generation, total > 0 ? double(received) / total : 0.);
-                    }
+                    publish(received, total);
                 });
         connect(reply, &QNetworkReply::finished, this, [this, reply] {
             const bool valid =
@@ -124,7 +162,9 @@ private:
             m_reply = nullptr;
             reply->deleteLater();
             if (valid && m_file->commit()) {
-                complete(true, {});
+                m_file.reset();
+                ++m_resource;
+                start();
                 return;
             }
             qCDebug(effectDownloads)
@@ -132,7 +172,7 @@ private:
                 << int(reply->error()) << "http_status"
                 << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             m_file.reset();
-            next();
+            attempt();
         });
     }
     void complete(bool success, const QString &error)
@@ -146,11 +186,13 @@ private:
     QNetworkAccessManager *m_network = nullptr;
     QNetworkReply *m_reply = nullptr;
     std::unique_ptr<QSaveFile> m_file;
+    QList<EffectResourceRequest> m_resources;
     QStringList m_urls;
     QString m_destination;
     QElapsedTimer m_throttle;
     quint64 m_generation = 0;
     qint64 m_bytes = 0;
+    int m_resource = 0;
     int m_url = 0;
 };
 } // namespace
@@ -174,10 +216,16 @@ ImpulseResponseInstaller::~ImpulseResponseInstaller()
 void ImpulseResponseInstaller::install(quint64 generation, const QStringList &urls,
                                        const QString &destination)
 {
+    install(generation, {EffectResourceRequest{urls, destination}});
+}
+void ImpulseResponseInstaller::install(quint64 generation,
+                                       const QList<EffectResourceRequest> &resources)
+{
     if (!m_closing)
         QMetaObject::invokeMethod(
-            m_worker, [worker = static_cast<InstallWorker *>(m_worker), generation, urls,
-                       destination] { worker->install(generation, urls, destination); });
+            m_worker, [worker = static_cast<InstallWorker *>(m_worker), generation, resources] {
+                worker->install(generation, resources);
+            });
 }
 void ImpulseResponseInstaller::cancel()
 {
