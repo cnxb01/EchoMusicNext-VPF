@@ -54,6 +54,28 @@ QString defaultPreset(const QString &id)
     return QString::fromUtf8(
         QJsonDocument(QJsonObject{{"presetId", id}}).toJson(QJsonDocument::Compact));
 }
+QString resourceExtension(const QString &path)
+{
+    const auto suffix = QFileInfo(path).suffix().toLower();
+    return suffix.isEmpty() ? QString() : "." + suffix;
+}
+/// Manifest capability check shared by the installed-engine queries. An entry
+/// without `extensions` accepts every file of that kind, matching ABI 2.
+bool manifestSupports(const QVariantMap &record, const QString &kind, const QString &extension)
+{
+    const auto manifest = record.value("manifest").toMap();
+    for (const auto &value : manifest.value("resources").toList()) {
+        const auto resource = value.toMap();
+        if (resource.value("kind").toString().compare(kind, Qt::CaseInsensitive) != 0)
+            continue;
+        if (extension.isEmpty() || !resource.contains("extensions"))
+            return true;
+        for (const auto &declared : resource.value("extensions").toList())
+            if (declared.toString().compare(extension, Qt::CaseInsensitive) == 0)
+                return true;
+    }
+    return false;
+}
 } // namespace
 
 PlaybackAudioControls::PlaybackAudioControls(AudioEngine &engine, NativeBridge &native,
@@ -182,21 +204,29 @@ QVariantList PlaybackAudioControls::impulseResponses() const
 {
     QVariantList result;
     QHash<QString, QString> sources;
+    QSet<QString> engines;
     // The local download identity is authored by AudioEffectCatalog, not an
     // upstream response. Project it here so QML never parses storage keys.
     const QString prefix = EchoMusic::SettingsKeys::Audio::DownloadedEffectsPrefix;
+    const QString vpfPrefix = EchoMusic::SettingsKeys::Audio::DownloadedEffectVpfPrefix;
     for (const auto &key : m_settings.allKeys()) {
         if (!key.startsWith(prefix))
             continue;
         const auto identity = key.mid(prefix.size());
         const auto source = identity.section('-', 0, 0);
+        const auto path = m_settings.value(key).toString();
         if (QStringList{"artist", "headphone", "market"}.contains(source))
-            sources.insert(m_settings.value(key).toString(), source);
+            sources.insert(path, source);
+        // A companion VPF file makes the entry an engine effect: the built-in
+        // convolution stage cannot apply it on its own.
+        if (!m_settings.value(vpfPrefix + identity).toString().isEmpty())
+            engines.insert(path);
     }
     for (const auto &path : m_irsPaths)
         result.append(QVariantMap{
             {"path", path},
             {"source", sources.value(path, QStringLiteral("local"))},
+            {"engine", engines.contains(path) || resourceExtension(path) == ".vpf"},
             {"name",
              effectDisplayName(m_settings
                                    .value(effectNameKey(path, m_settings.portableFilesRoot()),
@@ -208,17 +238,114 @@ QVariantList PlaybackAudioControls::impulseResponses() const
 void PlaybackAudioControls::registerImpulseResponse(const QString &path, const QString &name,
                                                     const QString &identity)
 {
-    if (!QFileInfo(path).isReadable())
+    registerEffectPackage(path, {}, name, identity);
+}
+void PlaybackAudioControls::registerEffectPackage(const QString &impulseResponsePath,
+                                                  const QString &vpfPath, const QString &name,
+                                                  const QString &identity)
+{
+    // A VPF-only market effect has no impulse response; the parameter file is
+    // then the selectable entry and is handed to the engine as a resource.
+    const auto primary = !impulseResponsePath.isEmpty() ? impulseResponsePath : vpfPath;
+    if (primary.isEmpty() || !QFileInfo(primary).isReadable())
         return;
-    const auto displayName = uniqueEffectName(name, path);
-    m_irsPaths.removeAll(path);
-    m_irsPaths.prepend(path);
+    const auto displayName = uniqueEffectName(name, primary);
+    m_irsPaths.removeAll(primary);
+    m_irsPaths.prepend(primary);
     m_settings.setValue(EchoMusic::SettingsKeys::Audio::ImpulseResponses, m_irsPaths);
-    m_settings.setValue(effectNameKey(path, m_settings.portableFilesRoot()), displayName);
-    if (!identity.isEmpty())
+    m_settings.setValue(effectNameKey(primary, m_settings.portableFilesRoot()), displayName);
+    if (!identity.isEmpty()) {
         m_settings.setValue(EchoMusic::SettingsKeys::Audio::DownloadedEffectsPrefix + identity,
-                            path);
+                            primary);
+        const auto companion =
+            EchoMusic::SettingsKeys::Audio::DownloadedEffectVpfPrefix + identity;
+        if (!vpfPath.isEmpty() && vpfPath != primary)
+            m_settings.setValue(companion, vpfPath);
+        else
+            m_settings.remove(companion);
+    }
     emit changed();
+}
+QString PlaybackAudioControls::identityForPath(const QString &path) const
+{
+    if (path.isEmpty())
+        return {};
+    const QString prefix = EchoMusic::SettingsKeys::Audio::DownloadedEffectsPrefix;
+    for (const auto &key : m_settings.allKeys())
+        if (key.startsWith(prefix) && m_settings.value(key).toString() == path)
+            return key.mid(prefix.size());
+    return {};
+}
+QString PlaybackAudioControls::vpfPathFor(const QString &path) const
+{
+    if (path.isEmpty())
+        return {};
+    if (resourceExtension(path) == ".vpf")
+        return QFileInfo(path).isReadable() ? path : QString();
+    const auto identity = identityForPath(path);
+    if (identity.isEmpty())
+        return {};
+    const auto vpf = m_settings
+                         .value(EchoMusic::SettingsKeys::Audio::DownloadedEffectVpfPrefix +
+                                identity)
+                         .toString();
+    return !vpf.isEmpty() && QFileInfo(vpf).isReadable() ? vpf : QString();
+}
+QJsonArray PlaybackAudioControls::effectResources(const QString &path) const
+{
+    QJsonArray resources;
+    const auto vpf = vpfPathFor(path);
+    if (!vpf.isEmpty())
+        resources.append(QJsonObject{{"kind", QStringLiteral("vpf")}, {"path", vpf}});
+    return resources;
+}
+bool PlaybackAudioControls::impulseRequiresEngine(const QString &path) const
+{
+    return !vpfPathFor(path).isEmpty();
+}
+bool PlaybackAudioControls::identityNeedsEngine(const QString &identity,
+                                                const QString &path) const
+{
+    if (resourceExtension(path) == ".vpf")
+        return true;
+    return !identity.isEmpty() &&
+           !m_settings
+                .value(EchoMusic::SettingsKeys::Audio::DownloadedEffectVpfPrefix + identity)
+                .toString()
+                .isEmpty();
+}
+bool PlaybackAudioControls::supportsResource(const QString &kind, const QString &extension) const
+{
+    if (kind.isEmpty())
+        return false;
+    for (const auto &value : m_providers.records())
+        if (manifestSupports(value.toMap(), kind, extension))
+            return true;
+    return false;
+}
+QString PlaybackAudioControls::providerForResources(const QJsonArray &resources) const
+{
+    if (resources.isEmpty())
+        return {};
+    const auto accepts = [&resources](const QVariantMap &record) {
+        if (record.value("path").toString().isEmpty())
+            return false;
+        for (const auto &value : resources) {
+            const auto resource = value.toObject();
+            if (!manifestSupports(record, resource.value("kind").toString(),
+                                  resourceExtension(resource.value("path").toString())))
+                return false;
+        }
+        return true;
+    };
+    // Keep the running engine when it accepts these resources: switching
+    // between two market effects must not reload the library or reset presets.
+    if (accepts(m_providers.record(m_targetProvider)))
+        return m_targetProvider;
+    for (const auto &value : m_providers.records())
+        if (accepts(value.toMap()))
+            return value.toMap().value("id").toString();
+    return {};
 }
 QString PlaybackAudioControls::downloadedImpulseResponse(const QString &identity) const
 {
@@ -555,12 +682,22 @@ void PlaybackAudioControls::removeImpulseResponse(const QString &path)
         emit fileNotice(tr("备份进行中，请稍后移除音效"), false);
         return;
     }
+    // Resolve the companion before the identity keys are dropped.
+    const auto identity = identityForPath(path);
+    const auto vpf = identity.isEmpty()
+                         ? QString()
+                         : m_settings
+                               .value(EchoMusic::SettingsKeys::Audio::DownloadedEffectVpfPrefix +
+                                      identity)
+                               .toString();
     m_irsPaths.removeAll(path);
     m_settings.remove(effectNameKey(path, m_settings.portableFilesRoot()));
     for (const auto &key : m_settings.allKeys())
         if (key.startsWith(EchoMusic::SettingsKeys::Audio::DownloadedEffectsPrefix) &&
             m_settings.value(key).toString() == path)
             m_settings.remove(key);
+    if (!identity.isEmpty())
+        m_settings.remove(EchoMusic::SettingsKeys::Audio::DownloadedEffectVpfPrefix + identity);
     m_settings.setValue(EchoMusic::SettingsKeys::Audio::ImpulseResponses, m_irsPaths);
     if (path == m_irs) {
         m_irs.clear();
@@ -569,10 +706,17 @@ void PlaybackAudioControls::removeImpulseResponse(const QString &path)
     }
     // Remove owned resources without touching the user's original file.
     // Canonical containment excludes symlinks to external resources.
-    const auto canonical = QFileInfo(path).canonicalFilePath();
     const auto directory = QFileInfo(effectFilesRoot()).canonicalFilePath();
-    if (!directory.isEmpty() && canonical.startsWith(directory + "/"))
-        QFile::remove(path);
+    const auto owned = [&directory](const QString &candidate) {
+        const auto canonical = QFileInfo(candidate).canonicalFilePath();
+        return !directory.isEmpty() && !canonical.isEmpty() &&
+               canonical.startsWith(directory + "/");
+    };
+    // A combined market effect owns both files; removing the entry must not
+    // leave an orphaned parameter file behind.
+    for (const auto &candidate : {path, vpf})
+        if (!candidate.isEmpty() && owned(candidate))
+            QFile::remove(candidate);
     emit changed();
     emit fileNotice(tr("已移除音效"), true);
 }
@@ -597,7 +741,8 @@ void PlaybackAudioControls::applyEffect()
 {
     if (!m_ready)
         return;
-    if (m_irsEnabled && !QFileInfo(m_irs).isReadable()) {
+    const bool hasFile = m_irsEnabled && !m_irs.isEmpty();
+    if (hasFile && !QFileInfo(m_irs).isReadable()) {
         m_error = tr("脉冲响应文件不可读取");
         if (!m_providerNotice.isEmpty()) {
             m_providerNotice.clear();
@@ -606,11 +751,31 @@ void PlaybackAudioControls::applyEffect()
         emit changed();
         return;
     }
-    const auto record = m_providers.record(m_targetProvider);
+    // A VPF file carries engine parameters, never convolution samples, so it is
+    // passed only as a provider resource and never as the impulse response.
+    const bool fileIsVpf = hasFile && resourceExtension(m_irs) == ".vpf";
+    const auto resources = hasFile ? effectResources(m_irs) : QJsonArray();
+    auto provider = m_targetProvider;
+    if (!resources.isEmpty()) {
+        // Effects with an engine resource require a compatible engine. Adopt
+        // one automatically so a downloaded VPF effect plays without the user
+        // having to activate the engine first.
+        provider = providerForResources(resources);
+        if (provider.isEmpty()) {
+            m_error = tr("此音效需要支持 VPF 的音效引擎");
+            if (!m_providerNotice.isEmpty()) {
+                m_providerNotice.clear();
+                emit fileNotice(m_error, false);
+            }
+            emit changed();
+            return;
+        }
+    }
     QJsonObject configuration{
-        {"impulseResponsePath", m_irsEnabled ? QJsonValue(m_irs) : QJsonValue()},
+        {"impulseResponsePath", hasFile && !fileIsVpf ? QJsonValue(m_irs) : QJsonValue()},
         {"impulseResponseMix", m_mix}};
-    if (!m_targetProvider.isEmpty()) {
+    if (!provider.isEmpty()) {
+        const auto record = m_providers.record(provider);
         if (record.isEmpty()) {
             m_error = tr("音效引擎不可用");
             if (!m_providerNotice.isEmpty()) {
@@ -620,10 +785,13 @@ void PlaybackAudioControls::applyEffect()
             emit changed();
             return;
         }
+        m_targetProvider = provider;
         configuration.insert("providerPath", record.value("path").toString());
         configuration.insert("providerMode", m_targetMode);
         if (!m_targetPreset.isEmpty())
             configuration.insert("providerPresetJson", m_targetPreset);
+        if (!resources.isEmpty())
+            configuration.insert("providerResources", resources);
     }
     m_effectPending = true;
     m_error.clear();
@@ -655,10 +823,21 @@ void PlaybackAudioControls::deactivateProvider()
 {
     if (m_effectPending)
         return;
+    const auto name = providerName();
     if (m_removingProvider.isEmpty())
-        m_providerNotice = tr("已停用“%1”").arg(providerName());
+        m_providerNotice = tr("已停用“%1”").arg(name);
     m_targetProvider.clear();
     m_targetPreset.clear();
+    // A market effect that only ships engine parameters has no built-in
+    // fallback, so stopping the engine must also release that effect instead
+    // of silently keeping a selection the built-in stage cannot apply.
+    if (m_irsEnabled && impulseRequiresEngine(m_irs)) {
+        m_irsEnabled = false;
+        m_settings.setValue(EchoMusic::SettingsKeys::Audio::ImpulseEnabled, false);
+        if (m_removingProvider.isEmpty())
+            m_providerNotice =
+                tr("已停用“%1”，当前音效需要音效引擎，已切换为原声").arg(name);
+    }
     applyEffect();
 }
 void PlaybackAudioControls::removeProvider(const QString &id)
