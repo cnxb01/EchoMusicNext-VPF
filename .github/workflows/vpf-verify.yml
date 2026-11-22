@@ -1,0 +1,163 @@
+name: VPF verification build
+
+# Focused verification pipeline added on top of the upstream release workflow.
+# It exists to prove that the VPF provider adaptation compiles on both a fast
+# Linux target and the Windows deliverable, without running the full release
+# matrix or publishing anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_package:
+        description: 'Also build and upload the Windows installer'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux-compile:
+    name: Linux x64 compile
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    env:
+      RUSTUP_TOOLCHAIN: '1.99.0'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Linux build prerequisites
+        run: |
+          sudo apt-get update
+          xargs -a tools/qt/linux-packages.txt sudo apt-get install -y
+          pkg-config --modversion libpipewire-0.3 libspa-0.2 alsa libpulse
+          python -m pip install cmake==4.4.4 ninja==1.13.0
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup run 1.99.0 rustc --version
+      - name: Restore pinned Qt SDK
+        id: qt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/qt-official
+          key: qt-prebuilt-qv4-6.12.0-ubuntu-22.04-x64-${{ hashFiles('scripts/qt_sdk.py', 'scripts/qt_download.py', 'scripts/install-qt.py', 'scripts/build-qt.py', 'scripts/qt_qv4_patch.py', 'scripts/patch-qt-qml.py', 'tools/qt/patches/**', 'tools/qt/requirements.txt', 'tools/qt/linux-packages.txt', 'tools/release/licenses.mjs', 'tools/release/qt-licenses.mjs', 'tools/release/license-files.mjs') }}
+      - name: Prepare and validate SDK
+        run: python scripts/install-qt.py
+      - name: Save validated Qt SDK
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/qt-official
+          key: ${{ steps.qt-cache.outputs.cache-primary-key }}
+      - name: SDK runtime path
+        shell: bash
+        run: |
+          python -c "from scripts.qt_sdk import preferred_prefix; import os; p=preferred_prefix(); open(os.environ['GITHUB_PATH'], 'a').write(str(p / 'bin') + '\n'); open(os.environ['GITHUB_ENV'], 'a').write('QT_PREFIX=' + p.as_posix() + '\n')"
+      - name: Restore pinned word-only ICU
+        id: icu-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/icu4c-78.3
+          key: icu-word-78.3-ubuntu-22.04-x64-${{ hashFiles('scripts/install-icu.py', 'scripts/icu_windows.py', 'scripts/icu_word_data.py') }}
+      - name: Build and validate native ICU word-break libraries
+        run: |
+          python scripts/install-icu.py --jobs 4
+          python scripts/install-icu.py --check
+      - name: Save validated ICU prefix
+        if: steps.icu-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/icu4c-78.3
+          key: ${{ steps.icu-cache.outputs.cache-primary-key }}
+      - name: Configure
+        run: python scripts/build.py --preset release --configure-only --distribution --no-tests --no-ffi-check --icu-root build/icu4c-78.3
+      - name: Build
+        run: cmake --build --preset release
+
+  windows-package:
+    name: Windows x64 build and package
+    if: ${{ inputs.windows_package }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      RUSTUP_TOOLCHAIN: '1.99.0'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build tools
+        run: python -m pip install cmake==4.4.4 ninja==1.13.0
+      - name: Windows packaging tools
+        run: choco install nsis --version=3.11 -y --no-progress
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup run 1.99.0 rustc --version
+          rustup run 1.99.0 cargo --version
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-2022-x64-${{ hashFiles('tools/qt/linux-packages.txt') }}
+          cache-on-failure: true
+      - name: Restore pinned Qt SDK
+        id: qt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/qt-official
+          key: qt-prebuilt-qv4-6.12.0-windows-2022-x64-${{ hashFiles('scripts/qt_sdk.py', 'scripts/qt_download.py', 'scripts/install-qt.py', 'scripts/build-qt.py', 'scripts/qt_qv4_patch.py', 'scripts/patch-qt-qml.py', 'tools/qt/patches/**', 'tools/qt/requirements.txt', 'tools/qt/linux-packages.txt', 'tools/release/licenses.mjs', 'tools/release/qt-licenses.mjs', 'tools/release/license-files.mjs') }}
+      - name: Prepare and validate SDK
+        run: python scripts/install-qt.py
+      - name: Save validated Qt SDK
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/qt-official
+          key: ${{ steps.qt-cache.outputs.cache-primary-key }}
+      - name: SDK runtime path
+        shell: bash
+        run: |
+          python -c "from scripts.qt_sdk import preferred_prefix; import os; p=preferred_prefix(); open(os.environ['GITHUB_PATH'], 'a').write(str(p / 'bin') + '\n'); open(os.environ['GITHUB_ENV'], 'a').write('QT_PREFIX=' + p.as_posix() + '\n')"
+      - name: Restore pinned word-only ICU
+        id: icu-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/icu4c-78.3
+          key: icu-word-78.3-windows-2022-x64-${{ hashFiles('scripts/install-icu.py', 'scripts/icu_windows.py', 'scripts/icu_word_data.py') }}
+      - name: Build and validate native ICU word-break libraries
+        run: |
+          python scripts/install-icu.py --jobs 4
+          python scripts/install-icu.py --check
+      - name: Save validated ICU prefix
+        if: steps.icu-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/icu4c-78.3
+          key: ${{ steps.icu-cache.outputs.cache-primary-key }}
+      - name: Configure
+        run: python scripts/build.py --preset release --configure-only --distribution --no-tests --no-ffi-check --icu-root build/icu4c-78.3
+      - name: Build
+        run: cmake --build --preset release
+      - name: Prepare deployment materials
+        run: node tools/release/prepare.mjs
+      - name: Package
+        shell: bash
+        run: node tools/release/package.mjs --arch=x64 "--qt=$QT_PREFIX"
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: desktop-Windows-x64
+          path: build/packages/*
+          if-no-files-found: warn
+          retention-days: 7
