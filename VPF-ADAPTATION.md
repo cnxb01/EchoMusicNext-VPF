@@ -5,26 +5,28 @@
 
 ## 仓库结构
 
-- `main`：与上游 `hoowhoami/EchoMusicNext` 保持一致，只多一个文件
-  `.github/workflows/vpf-verify.yml`。上游发新版时在网页点「Sync fork」即可快进同步，
-  不会碰到适配代码。
-- `vpf-adaptation`：适配代码所在的分支（本文件所在分支）。**构建请用这个分支。**
-- 标签 `vpf-0.1.7`：首次验证通过时的快照，可随时对比。
+- `vpf-adaptation`（**默认分支**）：适配代码所在处，打开仓库看到的就是它。
+- `main`：上游 `hoowhoami/EchoMusicNext` 的**逐字节镜像**，没有任何本地提交，
+  只用于对比和作为同步基线。
+- 标签 `vpf-0.1.7`：首次验证通过时的快照，可随时对比或回退。
 
-## 重新构建
+## 自己重建安装包（不改代码）
 
-Actions → 「VPF verification build」→ Run workflow：`build_ref` 默认 `vpf-adaptation`，
-勾选 `windows_package` 即产出 Windows 安装器，产物在本次运行的 Artifacts 里。
+1. 打开 Actions 标签页，左侧选「VPF verification build」。
+2. 右侧点 **Run workflow**，分支保持 `vpf-adaptation`，勾选 `windows_package`，再点绿色按钮。
+3. 约 70 分钟后，进这次运行页面，底部 **Artifacts** 下载安装包。
 
-## 上游更新后如何跟进
+## 上游发新版后如何跟进
 
-1. 在 `main` 上点「Sync fork」快进到上游最新（安全，不会覆盖适配）。
-2. 把 `vpf-adaptation` 变基到新 `main`：`git fetch origin && git rebase origin/main`。
-   冲突只会出现在下文列出的 10 个文件。
-3. 重跑上面的 workflow 并安装新产物。
+1. 在仓库首页（默认分支 `vpf-adaptation`）上方点 **Sync fork → Update branch**。
+   它会把上游最新提交**合并**进当前分支，不会丢弃适配代码。
+2. 若提示冲突（上游改到了下面列出的 10 个文件之一），网页无法解决，需要本地 rebase。
+3. 按上一节重跑 workflow，装新产物。
 
-**注意**：直接安装上游新发的 Setup.exe 会回到没有 VPF 支持的状态——补丁编译在二进制里，
-必须用本分支重新构建。
+**两个不要**：
+
+- 不要点 Sync fork 下拉里的「Discard N commits」——那会把适配提交删掉。
+- 不要直接安装上游新发的 Setup.exe——补丁编译在二进制里，装官方版就回到没有 VPF 支持的状态。
 
 ## 原症状
 
